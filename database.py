@@ -24,6 +24,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -31,6 +32,7 @@ from sqlalchemy import (
     event,
     text,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 from config import DATABASE_URL
@@ -203,12 +205,17 @@ class Option1mBar(Base):
     """
     __tablename__ = "option_1m_bar_repository"
     __table_args__ = (
+        # Unique constraint prevents duplicate bars on engine restart
         UniqueConstraint("symbol", "timestamp", name="uq_symbol_timestamp"),
+        # Explicit composite index: all backtest range queries filter on
+        # both columns together — without this, SQLite falls back to a
+        # full table scan as the vault grows across multiple sessions.
+        Index("ix_option1m_symbol_timestamp", "symbol", "timestamp"),
     )
 
     id        = Column(Integer, primary_key=True, autoincrement=True)
-    symbol    = Column(String(64), nullable=False, index=True)
-    timestamp = Column(DateTime,   nullable=False, index=True)
+    symbol    = Column(String(64), nullable=False)
+    timestamp = Column(DateTime,   nullable=False)
     open      = Column(Float,      nullable=False)
     high      = Column(Float,      nullable=False)
     low       = Column(Float,      nullable=False)
@@ -227,7 +234,10 @@ def init_db() -> None:
     """Create all tables and apply incremental migrations."""
     Base.metadata.create_all(_engine)
 
-    # Migration: add is_backtest column to existing trades_ledger tables
+    # Migration: add is_backtest column to existing trades_ledger tables.
+    # Only swallows the specific "duplicate column name" error so that any
+    # other OperationalError (permissions, locked DB, corrupt schema) still
+    # surfaces to the operator rather than being silently eaten.
     if "sqlite" in DATABASE_URL:
         with _engine.connect() as conn:
             try:
@@ -236,8 +246,11 @@ def init_db() -> None:
                 ))
                 conn.commit()
                 logger.info("Migration: added is_backtest column to trades_ledger")
-            except Exception:
-                pass  # Column already exists — safe to ignore
+            except OperationalError as exc:
+                if "duplicate column name" in str(exc).lower():
+                    pass   # Already migrated — safe to ignore
+                else:
+                    raise  # Unexpected DB error: surface it to the operator
 
     logger.info("Database schema initialised at %s", DATABASE_URL)
 
