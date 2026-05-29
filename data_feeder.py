@@ -30,9 +30,11 @@ from config import (
     HTF_BAR_MINUTES,
     LTF_BAR_MINUTES,
     RISK_BAR_MINUTES,
+    NIFTY_STRIKE_STEP,
     UPSTOX_ACCESS_TOKEN,
     FYERS_ACCESS_TOKEN,
     bar_key_for_minutes,
+    round_to_strike,
 )
 from database import (
     HistoricalOptionTraps,
@@ -45,6 +47,7 @@ from database import (
     set_trap_sl,
     void_trap,
 )
+from bridge import _data_bridge, NIFTY_SPOT_DISPLAY, NIFTY_SPOT_FYERS
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +264,7 @@ class TrapDetector:
             zone_low  = htf_trap.entry_origin * 0.995
             if zone_low <= bar.low <= zone_high or zone_low <= bar.close <= zone_high:
                 self._in_retest_zone = True
+                _data_bridge.set_retest_active(True)
                 logger.info(
                     "[LTF] Premium entered 75-min retest zone for %s at %.2f",
                     self.symbol, bar.close,
@@ -336,14 +340,24 @@ class TrapDetector:
         ):
             # Exact touch or crossing of the 5-min sellers' entry line
             if price <= self._ltf_entry_line:
+                # Gap 5: use current ATM strike for execution, not the tracked ITM symbol
+                spot = _data_bridge.get_spot_price()
+                if spot is not None:
+                    exec_symbol = _build_atm_symbol(self.symbol, spot)
+                else:
+                    exec_symbol = self.symbol   # fallback if spot not yet received
+                    logger.warning(
+                        "[ENTRY] Spot price unavailable — executing on tracked symbol %s",
+                        self.symbol,
+                    )
                 logger.info(
-                    "[ENTRY] Touch trigger! %s price=%.2f entry_line=%.2f",
-                    self.symbol, price, self._ltf_entry_line,
+                    "[ENTRY] Touch trigger! tracked=%s exec=%s price=%.2f entry_line=%.2f",
+                    self.symbol, exec_symbol, price, self._ltf_entry_line,
                 )
                 self._in_trade  = True
                 self._trade_sl  = self._ltf_sl_line
                 if self.on_execute and self._active_htf_trap_id is not None:
-                    self.on_execute(self.symbol, price, self._active_htf_trap_id)
+                    self.on_execute(exec_symbol, price, self._active_htf_trap_id)
 
         # Check target exit
         if self._in_trade and self._active_htf_trap_id is not None:
@@ -408,11 +422,23 @@ class BarAggregator:
             if detector is None:
                 continue
 
-            # 75-min bar
+            # Push live tick price to bridge so UI can display last price
+            _data_bridge.push_tick(symbol, price)
+
+            # 75-min bar — push completed bar to bridge for chart rendering
+            def _make_htf_close(sym: str):
+                def _on_htf_close(bar: OHLCV) -> None:
+                    detector.on_htf_bar_close(bar)
+                    _data_bridge.push_bar(
+                        sym,
+                        (bar.ts.isoformat(), bar.open, bar.high, bar.low, bar.close),
+                    )
+                return _on_htf_close
+
             self._bar_cache.on_tick(
                 symbol, price, ts, volume,
                 timeframe=HTF_BAR_MINUTES,
-                on_close=detector.on_htf_bar_close,
+                on_close=_make_htf_close(symbol),
             )
             # 5-min bar
             self._bar_cache.on_tick(
@@ -450,6 +476,34 @@ class BarAggregator:
 
 UPSTOX_WS_URL_V3 = "wss://api.upstox.com/v3/feed/market-data-feed"
 
+# Upstox instrument key for Nifty 50 spot index (URL-decoded form for WS subscription)
+_NIFTY_INDEX_KEY = NIFTY_SPOT_DISPLAY   # "NSE_INDEX|Nifty 50"
+
+
+def _build_atm_symbol(tracked_symbol: str, spot_price: float) -> str:
+    """
+    Given the tracked ITM contract symbol (e.g. NSE:NIFTY03JUN2523500CE) and the
+    current Nifty spot price, return the At-The-Money option symbol for execution.
+
+    ATM strike = round_to_strike(spot_price).
+    Preserves the expiry date string and CE/PE suffix from the tracked symbol.
+    """
+    import re
+    m = re.match(
+        r"(NSE:NIFTY)(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$",
+        tracked_symbol.upper(),
+    )
+    if not m:
+        logger.warning(
+            "_build_atm_symbol: cannot parse tracked symbol %s — using as-is",
+            tracked_symbol,
+        )
+        return tracked_symbol
+
+    prefix, expiry_str, _strike, opt_type = m.groups()
+    atm_strike = round_to_strike(spot_price)
+    return f"{prefix}{expiry_str}{atm_strike}{opt_type}"
+
 
 def _to_upstox_key(display_symbol: str) -> str:
     """
@@ -465,6 +519,10 @@ def _to_upstox_key(display_symbol: str) -> str:
         "MAY": 5,  "JUN": 6,  "JUL": 7,  "AUG": 8,
         "SEP": 9,  "OCT": 10, "NOV": 11, "DEC": 12,
     }
+    # Already in Upstox pipe-format (e.g. NSE_INDEX|Nifty 50 or NSE_FO|...)
+    if "|" in display_symbol:
+        return display_symbol
+
     # Pattern: NSE:NIFTY + DDMMMYY + strike + type
     m = re.match(
         r"NSE:NIFTY(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$",
@@ -586,10 +644,9 @@ async def _decode_upstox_binary(
         # Resolve the display symbol from the instrument key
         display_sym = key_to_display.get(instrument_key, instrument_key)
 
-        # Navigate the oneof chain: fullFeed → marketFF → ltpc
-        # (fullFeed is set for options; indexFF is set for indices — we never
-        #  subscribe to index instruments, so the marketFF branch is always taken)
+        # Navigate the oneof chain: fullFeed → marketFF / indexFF → ltpc
         ltpc = None
+        is_index = False
         which_feed = feed.WhichOneof("FeedUnion")
         if which_feed == "fullFeed":
             which_full = feed.fullFeed.WhichOneof("FullFeedUnion")
@@ -597,14 +654,24 @@ async def _decode_upstox_binary(
                 ltpc = feed.fullFeed.marketFF.ltpc
             elif which_full == "indexFF":
                 ltpc = feed.fullFeed.indexFF.ltpc
+                is_index = True
         elif which_feed == "compactFeed":
             which_compact = feed.compactFeed.WhichOneof("CompactFeedUnion")
             if which_compact == "marketCF":
                 ltpc = feed.compactFeed.marketCF.ltpc
             elif which_compact == "indexCF":
                 ltpc = feed.compactFeed.indexCF.ltpc
+                is_index = True
 
         if ltpc is None or ltpc.ltp == 0.0:
+            continue
+
+        ltp = float(ltpc.ltp)
+
+        # Index ticks (Nifty spot) update the bridge for ATM computation only;
+        # they are NOT forwarded to TICK_QUEUE which drives option bar aggregation.
+        if is_index or display_sym == NIFTY_SPOT_DISPLAY:
+            _data_bridge.update_spot_price(ltp)
             continue
 
         # Convert epoch-ms ltt to ISO string for downstream BarAggregator
@@ -615,7 +682,7 @@ async def _decode_upstox_binary(
 
         await TICK_QUEUE.put({
             "symbol": display_sym,
-            "price":  float(ltpc.ltp),
+            "price":  ltp,
             "ts":     ts_str,
             "volume": float(ltpc.ltq),
         })
@@ -702,8 +769,11 @@ class DualFeederSupervisor:
 
     def __init__(self, symbols: list[str]) -> None:
         self.symbols = symbols
-        self._upstox = UpstoxFeeder(symbols)
-        self._fyers  = FyersFeeder(symbols)
+        # Always include Nifty 50 spot index so ATM strikes can be computed at entry
+        upstox_symbols = list(symbols) + [NIFTY_SPOT_DISPLAY]
+        fyers_symbols  = list(symbols) + [NIFTY_SPOT_FYERS]
+        self._upstox = UpstoxFeeder(upstox_symbols)
+        self._fyers  = FyersFeeder(fyers_symbols)
         self._use_fallback = False
 
     async def run(self) -> None:

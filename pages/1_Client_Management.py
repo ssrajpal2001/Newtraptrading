@@ -398,17 +398,26 @@ for client in clients:
                         st.session_state[skey] = "done"
                     return _cb
 
-                start_oauth_flow_async(
+                _thread, auth_url = start_oauth_flow_async(
                     broker=broker_val,
                     api_key=client.api_key,
                     api_secret=client.api_secret,
                     client_db_id=client.id,
                     on_success=_make_success_cb(client.id, oauth_key),
                 )
+                st.session_state[f"auth_url_{client.id}"] = auth_url
                 st.info(
                     f"Browser opening for **{client.name}** ({broker_val}) login. "
                     f"Complete the login — token updates automatically."
                 )
+
+        if st.session_state.get(f"auth_url_{client.id}"):
+            auth_url_val = st.session_state[f"auth_url_{client.id}"]
+            st.markdown(
+                "**Headless server? Copy this URL to your local browser:**"
+            )
+            st.code(auth_url_val, language=None)
+            st.link_button(f"Open {broker_val} Login", auth_url_val)
 
         # Confirm delete dialog
         if st.session_state.confirm_delete == client.id:

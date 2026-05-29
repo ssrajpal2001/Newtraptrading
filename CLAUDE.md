@@ -240,7 +240,7 @@ st.session_state.panic_confirmed   # bool
 st.session_state.log_lines         # List[str]
 ```
 
-`StreamlitDataBridge` — thread-safe buffer (`threading.Lock`) for injecting bar data from the async engine into Streamlit session state. Methods: `push_bar(symbol, bar_tuple)`, `flush_to_session()`. **The `push_bar()` method is never called by `BarAggregator` — wiring is a known gap.**
+`StreamlitDataBridge` (`bridge.py`) — thread-safe buffer (`threading.Lock`) bridging the async engine and Streamlit UI. Methods: `push_bar()`, `push_tick()`, `update_spot_price()`, `get_spot_price()`, `set_retest_active()`, `flush_to_session()`. Fully wired to `BarAggregator` and `TrapDetector`.
 
 ---
 
@@ -331,26 +331,31 @@ These are the items explicitly not yet implemented. Work on these in the order l
 - `deploy/setup_ec2.sh` updated to run `build_protos.py` during provisioning
 - **Run `python build_protos.py` once after `pip install -r requirements.txt`**
 
-### GAP 3: StreamlitDataBridge Not Wired to BarAggregator
-**Files:** `app_ui.py:StreamlitDataBridge`, `data_feeder.py:BarAggregator`
-**Current state:** `StreamlitDataBridge._data_bridge` exists and `flush_to_session()` is called in `app_ui.py:main()`, but `push_bar()` is never called from `BarAggregator`.
-**What to build:** In `data_feeder.py:BarAggregator.run()`, after calling each `on_close` callback, also push the sealed bar to the bridge:
-```python
-from app_ui import _data_bridge   # import the module-level bridge instance
-# inside on_close for HTF bars:
-_data_bridge.push_bar(symbol, (bar.ts, bar.open, bar.high, bar.low, bar.close))
-```
-Avoid a circular import by moving `_data_bridge` to a standalone `bridge.py` module that both `data_feeder.py` and `app_ui.py` import from.
+### ~~GAP 3: StreamlitDataBridge Not Wired to BarAggregator~~ ✅ RESOLVED
+**Resolution:**
+- `StreamlitDataBridge` moved from `app_ui.py` to new standalone `bridge.py` module (avoids circular imports)
+- Added `push_tick(symbol, price)` and `update_spot_price(price)`, `get_spot_price()`, `set_retest_active(active)` methods
+- `BarAggregator.run()` (`data_feeder.py`) now calls `_data_bridge.push_bar(symbol, tuple)` on every HTF bar close via a wrapped `_make_htf_close()` closure
+- `BarAggregator.run()` also calls `_data_bridge.push_tick(symbol, price)` on every tick → populates `last_ce_price` / `last_pe_price` (fixes Gap 11 too)
+- `bridge.flush_to_session()` now syncs `ce_bars`, `pe_bars`, `retest_active`, `last_ce_price`, `last_pe_price` to session_state
+- `app_ui.py` now imports `_data_bridge` from `bridge` instead of defining it locally
 
-### GAP 4: OAuth Auth URL Not Displayed on Headless EC2
-**Files:** `pages/2_Admin_Panel.py`, `pages/1_Client_Management.py`
-**Current state:** After clicking Connect, only a generic info message appears. On EC2 (no display), `webbrowser.open()` silently does nothing.
-**What to build:** In `oauth_handler.py:OAuthSession.run()`, after calling `webbrowser.open()`, also return the auth URL string. In the Admin Panel and Client Management pages, display this URL as a `st.code()` block and a `st.link_button()` so the user can copy/click it manually from their laptop browser.
+### ~~GAP 4: OAuth Auth URL Not Displayed on Headless EC2~~ ✅ RESOLVED
+**Resolution:**
+- `start_oauth_flow_async()` in `oauth_handler.py` now returns `(thread, auth_url)` tuple
+- Auth URL is constructed before the thread starts, using the broker config template
+- `pages/2_Admin_Panel.py`: after Connect, stores auth URL in `session_state["upstox_auth_url"]` / `["fyers_auth_url"]` and renders `st.code()` + `st.link_button()` below the form
+- `pages/1_Client_Management.py`: per-client auth URL stored in `session_state[f"auth_url_{client.id}"]`, rendered the same way
 
-### GAP 5: ATM Contract Selection at Entry
-**Files:** `execution_engine.py:fire_entry()`, `data_feeder.py:TrapDetector.on_tick()`
-**Current state:** `on_execute(symbol, price, trap_id)` passes `self.symbol` which is the **tracked ITM contract** (e.g., 500 points ITM on Wednesday). The spec requires the order to be placed on the **ATM contract** (closest strike to the current spot price at entry moment).
-**What to build:** At the time of entry touch, fetch the current Nifty spot price (from the live tick stream or a REST call), compute `ATM_strike = round_to_50(spot_price)`, construct the ATM symbol, and pass that to `fire_entry()` instead of the tracked ITM symbol.
+### ~~GAP 5: ATM Contract Selection at Entry~~ ✅ RESOLVED
+**Resolution:**
+- `bridge.py` exports `NIFTY_SPOT_DISPLAY = "NSE_INDEX|Nifty 50"` and `NIFTY_SPOT_FYERS = "NSE:NIFTY50-INDEX"`
+- `DualFeederSupervisor.__init__` appends index symbol to both Upstox and Fyers subscription lists
+- `_decode_upstox_binary()`: when `is_index=True` (indexFF branch), calls `_data_bridge.update_spot_price(ltp)` and does NOT forward to `TICK_QUEUE`
+- `_to_upstox_key()` updated to pass through symbols already containing `|` (index key needs no conversion)
+- `_build_atm_symbol(tracked_symbol, spot_price)` added: extracts expiry/type from tracked symbol, applies `round_to_strike(spot_price)` to compute ATM strike
+- `TrapDetector.on_tick()`: at entry moment, reads `_data_bridge.get_spot_price()` and calls `_build_atm_symbol()`. Falls back to tracked symbol if spot not yet received (logs a warning)
+- `TrapDetector.on_ltf_bar_close()`: calls `_data_bridge.set_retest_active(True)` when premium enters retest zone (also fixes Gap 10)
 
 ### GAP 6: Position Sizing by `max_capital`
 **Files:** `execution_engine.py:fire_entry()`

@@ -186,17 +186,23 @@ with feed_col1:
                 st.session_state.upstox_token        = token
                 st.session_state.upstox_oauth_status = "done"
 
-            start_oauth_flow_async(
+            _thread, auth_url = start_oauth_flow_async(
                 broker="UPSTOX",
                 api_key=ux_api_key.strip(),
                 api_secret=ux_api_secret.strip(),
                 client_db_id=int(ux_client_id) if ux_client_id > 0 else None,
                 on_success=_upstox_success,
             )
+            st.session_state["upstox_auth_url"] = auth_url
             st.info(
                 "Browser opening for Upstox login.  "
                 "Complete the login and return here — the token will update automatically."
             )
+
+    if st.session_state.get("upstox_auth_url"):
+        st.markdown("**If the browser did not open automatically (headless server), copy this URL to your local browser:**")
+        st.code(st.session_state["upstox_auth_url"], language=None)
+        st.link_button("Open Upstox Login", st.session_state["upstox_auth_url"])
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -238,17 +244,23 @@ with feed_col2:
                 st.session_state.fyers_token        = token
                 st.session_state.fyers_oauth_status = "done"
 
-            start_oauth_flow_async(
+            _thread, auth_url = start_oauth_flow_async(
                 broker="FYERS",
                 api_key=fy_app_id.strip(),
                 api_secret=fy_secret_key.strip(),
                 client_db_id=int(fy_client_id) if fy_client_id > 0 else None,
                 on_success=_fyers_success,
             )
+            st.session_state["fyers_auth_url"] = auth_url
             st.info(
                 "Browser opening for Fyers login.  "
                 "Complete the login and return here."
             )
+
+    if st.session_state.get("fyers_auth_url"):
+        st.markdown("**If the browser did not open automatically (headless server), copy this URL to your local browser:**")
+        st.code(st.session_state["fyers_auth_url"], language=None)
+        st.link_button("Open Fyers Login", st.session_state["fyers_auth_url"])
 
     st.markdown("</div>", unsafe_allow_html=True)
 

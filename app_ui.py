@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from datetime import datetime
 from typing import Optional
 
@@ -37,6 +36,7 @@ from database import (
     init_db,
 )
 from execution_engine import engine
+from bridge import _data_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -537,42 +537,6 @@ def _refresh_live_data() -> None:
     from data_feeder import TICK_QUEUE  # noqa: F401
     # Bar data is injected into session_state by the background thread
     # (see StreamlitDataBridge below)
-
-
-# ---------------------------------------------------------------------------
-# Background thread bridge: injects live bar data into session_state
-# ---------------------------------------------------------------------------
-
-class StreamlitDataBridge:
-    """
-    Runs in a background thread.  Consumes completed bar data posted by
-    BarAggregator and writes into a thread-safe buffer that the main
-    Streamlit rendering loop reads from session_state.
-    """
-
-    def __init__(self) -> None:
-        self._ce_bars: list = []
-        self._pe_bars: list = []
-        self._lock = threading.Lock()
-
-    def push_bar(self, symbol: str, bar_tuple: tuple) -> None:
-        with self._lock:
-            if "CE" in symbol:
-                self._ce_bars.append(bar_tuple)
-                if len(self._ce_bars) > 500:
-                    self._ce_bars = self._ce_bars[-500:]
-            else:
-                self._pe_bars.append(bar_tuple)
-                if len(self._pe_bars) > 500:
-                    self._pe_bars = self._pe_bars[-500:]
-
-    def flush_to_session(self) -> None:
-        with self._lock:
-            st.session_state.ce_bars = list(self._ce_bars)
-            st.session_state.pe_bars = list(self._pe_bars)
-
-
-_data_bridge = StreamlitDataBridge()
 
 
 # ---------------------------------------------------------------------------

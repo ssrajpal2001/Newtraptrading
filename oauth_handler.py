@@ -334,18 +334,31 @@ def start_oauth_flow_async(
     api_secret: str,
     client_db_id: Optional[int] = None,
     on_success: Optional[Callable[[str], None]] = None,
-) -> threading.Thread:
+) -> tuple[threading.Thread, str]:
     """
     Launch the OAuth flow in a background thread so Streamlit's render loop
     is not blocked.  The on_success callback fires when the token is ready.
+
+    Returns:
+        (thread, auth_url) — the background thread and the broker authorization
+        URL that the user must open in a browser.  On headless EC2 instances
+        webbrowser.open() silently fails; display auth_url via st.code() /
+        st.link_button() so the user can copy it to their local browser.
     """
+    broker_upper = broker.upper()
+    cfg = BROKER_OAUTH_CONFIG.get(broker_upper, {})
+    auth_url = cfg.get("auth_url", "").format(
+        api_key=api_key,
+        redirect_uri=CALLBACK_URL,
+    )
+
     session = OAuthSession(
-        broker=broker,
+        broker=broker_upper,
         api_key=api_key,
         api_secret=api_secret,
         client_db_id=client_db_id,
         on_success=on_success,
     )
-    t = threading.Thread(target=session.run, daemon=True, name=f"oauth-{broker}")
+    t = threading.Thread(target=session.run, daemon=True, name=f"oauth-{broker_upper}")
     t.start()
-    return t
+    return t, auth_url
