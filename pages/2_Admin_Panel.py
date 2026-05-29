@@ -10,6 +10,7 @@ Sections
   4. Manual Trap Registry       — add / override / void traps by hand
   5. Expiry Flush               — Tuesday end-of-week cleanup button
   6. Database Export            — CSV download for trades & traps
+  7. Strategy Control & Backtest Workspace
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from __future__ import annotations
 import io
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -45,6 +46,8 @@ from database import (
 )
 from oauth_handler import BROKER_OAUTH_CONFIG, start_oauth_flow_async
 from database import BrokerName
+from strategy_config import _strategy_config
+from backtest_engine import DynamicBacktestEngine
 
 logger = logging.getLogger(__name__)
 
@@ -676,3 +679,236 @@ try:
     sc3.metric("Total Trade Records", n_trades)
 except Exception as exc:
     st.warning(f"Could not query DB stats: {exc}")
+
+st.markdown("---")
+
+# ===========================================================================
+# Section 7 — Strategy Control & Backtest Workspace
+# ===========================================================================
+
+st.markdown("## 🛠️ Strategy Control & Backtest Workspace")
+st.markdown(
+    "<p style='color:#8B949E;'>Adjust live strategy thresholds and replay historical "
+    "1-minute data through the institutional trap engine without restarting.</p>",
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# 7A — Operational Parameter Controls
+# ---------------------------------------------------------------------------
+
+st.markdown("### ⚙️ Operational Parameters")
+st.markdown(
+    "<p style='color:#8B949E; font-size:0.85rem;'>"
+    "Timeframe changes (HTF / MTF / LTF) take effect after engine restart. "
+    "Retest zone % and slippage apply immediately.</p>",
+    unsafe_allow_html=True,
+)
+
+op_col1, op_col2, op_col3, op_col4, op_col5 = st.columns(5)
+
+with op_col1:
+    new_htf = st.selectbox(
+        "HTF (Higher Timeframe)",
+        options=[15, 30, 45, 60, 75, 90, 120],
+        index=[15, 30, 45, 60, 75, 90, 120].index(
+            min([15, 30, 45, 60, 75, 90, 120],
+                key=lambda x: abs(x - _strategy_config.htf_minutes))
+        ),
+        help="Institutional seller trap timeframe. Default: 75 min.",
+    )
+
+with op_col2:
+    new_mtf = st.selectbox(
+        "MTF (Entry Timeframe)",
+        options=[1, 2, 3, 5, 10, 15],
+        index=[1, 2, 3, 5, 10, 15].index(
+            min([1, 2, 3, 5, 10, 15],
+                key=lambda x: abs(x - _strategy_config.mtf_minutes))
+        ),
+        help="Nested seller trap confirmation timeframe. Default: 5 min.",
+    )
+
+with op_col3:
+    new_ltf = st.selectbox(
+        "LTF (Risk / SL Timeframe)",
+        options=[1, 2, 3, 5],
+        index=[1, 2, 3, 5].index(
+            min([1, 2, 3, 5],
+                key=lambda x: abs(x - _strategy_config.ltf_minutes))
+        ),
+        help="Close-based stop-loss evaluation timeframe. Default: 1 min.",
+    )
+
+with op_col4:
+    new_zone_pct = st.slider(
+        "Retest Zone (%)",
+        min_value=0.1,
+        max_value=2.0,
+        value=float(round(_strategy_config.retest_zone_pct, 2)),
+        step=0.05,
+        help="Proximity band around 75-min origin that triggers retest alert.",
+    )
+
+with op_col5:
+    new_slippage = st.number_input(
+        "Slippage Buffer (%)",
+        min_value=0.0,
+        max_value=2.0,
+        value=float(round(_strategy_config.slippage_pct, 2)),
+        step=0.05,
+        format="%.2f",
+        help="Extra % buffer applied to market entry price (execution protection).",
+    )
+
+if st.button("💾 Apply Strategy Parameters", use_container_width=False):
+    _strategy_config.htf_minutes     = new_htf
+    _strategy_config.mtf_minutes     = new_mtf
+    _strategy_config.ltf_minutes     = new_ltf
+    _strategy_config.retest_zone_pct = new_zone_pct
+    _strategy_config.slippage_pct    = new_slippage
+    st.success(
+        f"Parameters updated — HTF={new_htf}m MTF={new_mtf}m LTF={new_ltf}m "
+        f"Zone=±{new_zone_pct:.2f}% Slippage={new_slippage:.2f}%. "
+        f"Restart the engine for timeframe changes to take effect on live bars."
+    )
+
+# ---------------------------------------------------------------------------
+# 7B — Backtest Workspace
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("### 📊 Historical Replay Controls")
+st.markdown(
+    "<p style='color:#8B949E;'>Replays stored 1-minute option bars through the trap "
+    "strategy using the parameters above. Bars are captured automatically by the live "
+    "engine during market hours.</p>",
+    unsafe_allow_html=True,
+)
+
+bt_col1, bt_col2, bt_col3 = st.columns([1, 1, 2])
+
+with bt_col1:
+    bt_from = st.date_input(
+        "Replay From",
+        value=date.today() - timedelta(days=7),
+        max_value=date.today(),
+        key="bt_from_date",
+    )
+
+with bt_col2:
+    bt_to = st.date_input(
+        "Replay To",
+        value=date.today(),
+        min_value=bt_from,
+        max_value=date.today(),
+        key="bt_to_date",
+    )
+
+with bt_col3:
+    bt_symbol = st.text_input(
+        "Option Contract Symbol",
+        placeholder="NSE:NIFTY03JUN2523500CE",
+        help="Enter the exact symbol stored in your 1m bar vault.",
+        key="bt_symbol",
+    )
+
+bt_qty_col, bt_btn_col = st.columns([1, 3])
+with bt_qty_col:
+    bt_quantity = st.number_input(
+        "Quantity (units)",
+        min_value=25,
+        value=25,
+        step=25,
+        help="Total units per trade (multiples of LOT_SIZE=25).",
+        key="bt_quantity",
+    )
+
+with bt_btn_col:
+    run_backtest = st.button(
+        "▶️ Run Dynamic Local Backtest",
+        use_container_width=True,
+        type="primary",
+        key="run_backtest_btn",
+    )
+
+# Backtest execution and result display
+if run_backtest:
+    if not bt_symbol.strip():
+        st.error("Enter a contract symbol to replay.")
+    else:
+        from_dt = datetime(bt_from.year, bt_from.month, bt_from.day, 0, 0, 0)
+        to_dt   = datetime(bt_to.year,   bt_to.month,   bt_to.day,   23, 59, 59)
+
+        log_placeholder = st.empty()
+        log_lines: list = []
+
+        def _log_cb(msg: str) -> None:
+            log_lines.append(msg)
+            log_placeholder.text_area(
+                "Backtest Log",
+                value="\n".join(log_lines),
+                height=200,
+                key=f"bt_log_{len(log_lines)}",
+            )
+
+        with st.spinner("Running backtest replay…"):
+            try:
+                bt_engine = DynamicBacktestEngine()
+                result = bt_engine.run(
+                    symbol=bt_symbol.strip(),
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    quantity=int(bt_quantity),
+                    persist_trades=True,
+                    log_cb=_log_cb,
+                )
+            except Exception as exc:
+                st.error(f"Backtest error: {exc}")
+                result = None
+
+        if result is not None:
+            st.success(
+                f"Backtest complete — {result.total_trades} trades | "
+                f"Net P&L: ₹{result.net_pnl:+,.2f} | Win Rate: {result.win_rate:.1f}%"
+            )
+
+            # Summary metrics
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Total Trades",  result.total_trades)
+            mc2.metric("Closed Trades", len(result.closed_trades))
+            mc3.metric("Net P&L",       f"₹{result.net_pnl:+,.0f}")
+            mc4.metric("Win Rate",      f"{result.win_rate:.1f}%")
+
+            if result.trades:
+                import pandas as pd
+                trades_df = pd.DataFrame([
+                    {
+                        "Entry Time":    t.entered_at,
+                        "Exit Time":     t.exited_at,
+                        "Symbol":        t.symbol,
+                        "Entry ₹":       t.entry_price,
+                        "Exit ₹":        t.exit_price,
+                        "Qty":           t.quantity,
+                        "P&L ₹":         t.pnl,
+                        "Exit Type":     t.exit_category,
+                    }
+                    for t in result.trades
+                ])
+
+                def _colour_pnl(val):
+                    if val is None:
+                        return "color: #f0a500"
+                    return "color: #238636" if val >= 0 else "color: #DA3633"
+
+                styled = trades_df.style.applymap(_colour_pnl, subset=["P&L ₹"])
+                st.dataframe(styled, use_container_width=True)
+
+                # CSV export
+                csv = trades_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇️ Export Backtest CSV",
+                    data=csv,
+                    file_name=f"backtest_{bt_symbol.strip()}_{bt_from}_{bt_to}.csv",
+                    mime="text/csv",
+                )

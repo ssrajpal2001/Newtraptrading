@@ -408,9 +408,12 @@ These are the items explicitly not yet implemented. Work on these in the order l
 
 ### Module boundaries
 - `config.py` has zero imports from other project modules. All other modules may import from `config.py`.
+- `strategy_config.py` imports only from `config.py`. All other modules may import from it.
 - `database.py` imports only from `config.py`. No circular deps.
-- `data_feeder.py` imports from `config.py` and `database.py` only.
+- `bridge.py` imports nothing from project modules (stdlib only).
+- `data_feeder.py` imports from `config.py`, `database.py`, `bridge.py`, `strategy_config.py`.
 - `execution_engine.py` imports from `config.py` and `database.py` only.
+- `backtest_engine.py` imports from `database.py` and `strategy_config.py`.
 - `oauth_handler.py` imports from `database.py` only.
 - `app_ui.py` and `pages/` may import from any module.
 - `main.py` imports from all modules to wire them together.

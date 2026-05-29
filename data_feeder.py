@@ -43,11 +43,13 @@ from database import (
     get_active_traps,
     get_next_lower_trap,
     mitigate_trap,
+    persist_1m_bar,
     register_trap,
     set_trap_sl,
     void_trap,
 )
 from bridge import _data_bridge, NIFTY_SPOT_DISPLAY, NIFTY_SPOT_FYERS
+from strategy_config import _strategy_config
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +262,9 @@ class TrapDetector:
 
         # Phase 1: Wait for retest of 75-min origin zone
         if not self._in_retest_zone:
-            zone_high = htf_trap.entry_origin * 1.005   # 0.5% tolerance band
-            zone_low  = htf_trap.entry_origin * 0.995
+            pct       = _strategy_config.retest_zone_pct / 100.0
+            zone_high = htf_trap.entry_origin * (1.0 + pct)
+            zone_low  = htf_trap.entry_origin * (1.0 - pct)
             if zone_low <= bar.low <= zone_high or zone_low <= bar.close <= zone_high:
                 self._in_retest_zone = True
                 _data_bridge.set_retest_active(True)
@@ -391,11 +394,23 @@ class BarAggregator:
     """
     Subscribes to the shared TICK_QUEUE and drives TrapDetector instances.
     Instantiated once per session; accepts dynamically injected symbols.
+
+    Timeframes are snapshotted from strategy_config at init time — changing
+    HTF/MTF/LTF in the UI takes effect after engine restart.
+    The retest zone % is read live on each bar close and can change instantly.
     """
 
     def __init__(self) -> None:
         self._bar_cache   = BarCache()
         self._detectors:  Dict[str, TrapDetector] = {}
+        # Snapshot timeframes at startup — mid-session change breaks bar keys
+        self._htf = _strategy_config.htf_minutes
+        self._mtf = _strategy_config.mtf_minutes
+        self._ltf = _strategy_config.ltf_minutes
+        logger.info(
+            "BarAggregator init | HTF=%dm MTF=%dm LTF=%dm",
+            self._htf, self._mtf, self._ltf,
+        )
 
     def register_symbol(self, detector: TrapDetector) -> None:
         self._detectors[detector.symbol] = detector
@@ -425,7 +440,7 @@ class BarAggregator:
             # Push live tick price to bridge so UI can display last price
             _data_bridge.push_tick(symbol, price)
 
-            # 75-min bar — push completed bar to bridge for chart rendering
+            # HTF bar — push completed bar to bridge for chart rendering
             def _make_htf_close(sym: str):
                 def _on_htf_close(bar: OHLCV) -> None:
                     detector.on_htf_bar_close(bar)
@@ -437,20 +452,30 @@ class BarAggregator:
 
             self._bar_cache.on_tick(
                 symbol, price, ts, volume,
-                timeframe=HTF_BAR_MINUTES,
+                timeframe=self._htf,
                 on_close=_make_htf_close(symbol),
             )
-            # 5-min bar
+            # MTF bar (entry timeframe)
             self._bar_cache.on_tick(
                 symbol, price, ts, volume,
-                timeframe=LTF_BAR_MINUTES,
+                timeframe=self._mtf,
                 on_close=detector.on_ltf_bar_close,
             )
-            # 1-min bar
+            # LTF / Risk bar + 1-minute persistence (always at 1m for data vault)
+            def _make_ltf_close(sym: str):
+                def _on_ltf_close(bar: OHLCV) -> None:
+                    detector.on_risk_bar_close(bar)
+                    # Persist every completed LTF bar to the local 1m vault
+                    persist_1m_bar(
+                        sym, bar.ts,
+                        bar.open, bar.high, bar.low, bar.close, bar.volume,
+                    )
+                return _on_ltf_close
+
             self._bar_cache.on_tick(
                 symbol, price, ts, volume,
-                timeframe=RISK_BAR_MINUTES,
-                on_close=detector.on_risk_bar_close,
+                timeframe=self._ltf,
+                on_close=_make_ltf_close(symbol),
             )
 
             # Sub-bar live tick evaluation (touch entry check)

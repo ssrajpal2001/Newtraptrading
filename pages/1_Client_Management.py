@@ -150,18 +150,18 @@ def _delete_client(client_id: int) -> None:
             s.delete(c)
 
 
-def _get_trades_for_client(client_id: int) -> list[dict]:
+def _get_trades_for_client(client_id: int, include_backtest: bool = False) -> list[dict]:
     with db_session() as s:
-        trades = (
+        q = (
             s.query(TradesLedger)
             .filter(TradesLedger.client_id == client_id)
-            .order_by(TradesLedger.entered_at.desc())
-            .limit(100)
-            .all()
         )
+        if not include_backtest:
+            q = q.filter(TradesLedger.is_backtest == False)
+        trades = q.order_by(TradesLedger.entered_at.desc()).limit(100).all()
         rows = []
         for t in trades:
-            rows.append({
+            row = {
                 "Trade ID":      t.id,
                 "Symbol":        t.contract_symbol,
                 "Entry ₹":       f"{t.entry_price:.2f}",
@@ -171,22 +171,32 @@ def _get_trades_for_client(client_id: int) -> list[dict]:
                 "Exit Type":     t.exit_category.value if t.exit_category else "—",
                 "Entered At":    t.entered_at.strftime("%Y-%m-%d %H:%M:%S") if t.entered_at else "",
                 "Exited At":     t.exited_at.strftime("%Y-%m-%d %H:%M:%S") if t.exited_at else "—",
-            })
+            }
+            if include_backtest:
+                row["Backtest"] = "✅" if t.is_backtest else "—"
+            rows.append(row)
         return rows
 
 
-def _client_summary_stats(client_id: int) -> dict:
+def _client_summary_stats(client_id: int, include_backtest: bool = False) -> dict:
     with db_session() as s:
+        base_q = s.query(TradesLedger).filter(TradesLedger.client_id == client_id)
+        if not include_backtest:
+            base_q = base_q.filter(TradesLedger.is_backtest == False)
+
         total = s.query(func.count(TradesLedger.id)).filter(
-            TradesLedger.client_id == client_id
+            TradesLedger.client_id == client_id,
+            *([] if include_backtest else [TradesLedger.is_backtest == False]),
         ).scalar() or 0
         pnl_sum = s.query(func.sum(TradesLedger.pnl)).filter(
             TradesLedger.client_id == client_id,
             TradesLedger.pnl.isnot(None),
+            *([] if include_backtest else [TradesLedger.is_backtest == False]),
         ).scalar() or 0.0
         wins = s.query(func.count(TradesLedger.id)).filter(
             TradesLedger.client_id == client_id,
             TradesLedger.pnl > 0,
+            *([] if include_backtest else [TradesLedger.is_backtest == False]),
         ).scalar() or 0
         return {"total": total, "pnl": pnl_sum, "wins": wins}
 
@@ -201,6 +211,8 @@ if "expand_trades" not in st.session_state:
     st.session_state.expand_trades = set()
 if "confirm_delete" not in st.session_state:
     st.session_state.confirm_delete = None
+if "show_backtest_overlay" not in st.session_state:
+    st.session_state.show_backtest_overlay = False
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +224,30 @@ st.markdown(
     "👥  CLIENT MANAGEMENT</h1>",
     unsafe_allow_html=True,
 )
-st.markdown(
-    "<p style='color:#8B949E;'>Register and manage trading client accounts, "
-    "update daily access tokens, and review per-client P&amp;L history.</p>",
-    unsafe_allow_html=True,
-)
+hdr_col1, hdr_col2 = st.columns([4, 1])
+with hdr_col1:
+    st.markdown(
+        "<p style='color:#8B949E;'>Register and manage trading client accounts, "
+        "update daily access tokens, and review per-client P&amp;L history.</p>",
+        unsafe_allow_html=True,
+    )
+with hdr_col2:
+    st.session_state.show_backtest_overlay = st.toggle(
+        "Enable Backtest Overlay",
+        value=st.session_state.show_backtest_overlay,
+        help="When ON, shows backtest simulation trades alongside live production P&L.",
+    )
+
+if st.session_state.show_backtest_overlay:
+    st.markdown(
+        "<div style='background:#1a1200; border:1px solid #f0a500; border-radius:6px; "
+        "padding:8px 14px; margin-bottom:8px;'>"
+        "⚠️ <b style='color:#f0a500;'>Backtest Overlay ACTIVE</b> — "
+        "simulation trades are included in P&L summaries and trade tables. "
+        "Disable the toggle above to view live production data only.</div>",
+        unsafe_allow_html=True,
+    )
+
 st.markdown("---")
 
 
@@ -321,7 +352,10 @@ for client in clients:
                 unsafe_allow_html=True,
             )
         with head_col3:
-            stats = _client_summary_stats(client.id)
+            stats = _client_summary_stats(
+                client.id,
+                include_backtest=st.session_state.show_backtest_overlay,
+            )
             pnl_color = "#238636" if stats["pnl"] >= 0 else "#DA3633"
             st.markdown(
                 f"<span style='color:#8B949E;'>Trades: </span><b>{stats['total']}</b> &nbsp;"
@@ -485,7 +519,10 @@ for client in clients:
         if client.id in st.session_state.expand_trades:
             st.markdown("---")
             st.markdown(f"**Trade History — {client.name}**")
-            trade_rows = _get_trades_for_client(client.id)
+            trade_rows = _get_trades_for_client(
+                client.id,
+                include_backtest=st.session_state.show_backtest_overlay,
+            )
             if trade_rows:
                 df = pd.DataFrame(trade_rows)
 

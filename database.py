@@ -26,8 +26,10 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    UniqueConstraint,
     create_engine,
     event,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -181,6 +183,9 @@ class TradesLedger(Base):
     entered_at      = Column(DateTime, default=datetime.utcnow)
     exited_at       = Column(DateTime, nullable=True)
 
+    is_backtest     = Column(Boolean, default=False, nullable=False,
+                             server_default="0")
+
     client = relationship("ClientsRegistry", back_populates="trades")
 
     def __repr__(self) -> str:
@@ -190,13 +195,50 @@ class TradesLedger(Base):
         )
 
 
+class Option1mBar(Base):
+    """
+    Permanent 1-minute OHLCV repository for all tracked option contracts.
+    Written by BarAggregator on every 1-minute bar close.
+    Used as the source dataset for the Dynamic Backtest Engine.
+    """
+    __tablename__ = "option_1m_bar_repository"
+    __table_args__ = (
+        UniqueConstraint("symbol", "timestamp", name="uq_symbol_timestamp"),
+    )
+
+    id        = Column(Integer, primary_key=True, autoincrement=True)
+    symbol    = Column(String(64), nullable=False, index=True)
+    timestamp = Column(DateTime,   nullable=False, index=True)
+    open      = Column(Float,      nullable=False)
+    high      = Column(Float,      nullable=False)
+    low       = Column(Float,      nullable=False)
+    close     = Column(Float,      nullable=False)
+    volume    = Column(Float,      default=0.0)
+
+    def __repr__(self) -> str:
+        return f"<Option1mBar {self.symbol} {self.timestamp} c={self.close}>"
+
+
 # ---------------------------------------------------------------------------
 # DDL initialiser
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Create all tables if they don't exist yet."""
+    """Create all tables and apply incremental migrations."""
     Base.metadata.create_all(_engine)
+
+    # Migration: add is_backtest column to existing trades_ledger tables
+    if "sqlite" in DATABASE_URL:
+        with _engine.connect() as conn:
+            try:
+                conn.execute(text(
+                    "ALTER TABLE trades_ledger ADD COLUMN is_backtest BOOLEAN NOT NULL DEFAULT 0"
+                ))
+                conn.commit()
+                logger.info("Migration: added is_backtest column to trades_ledger")
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
     logger.info("Database schema initialised at %s", DATABASE_URL)
 
 
@@ -320,27 +362,6 @@ def get_next_lower_trap(
 # Trade ledger helpers
 # ---------------------------------------------------------------------------
 
-def record_trade_entry(
-    client_id: int,
-    contract_symbol: str,
-    entry_price: float,
-    quantity: int = 1,
-    trap_id: Optional[int] = None,
-) -> TradesLedger:
-    with db_session() as s:
-        trade = TradesLedger(
-            client_id=client_id,
-            trap_id=trap_id,
-            contract_symbol=contract_symbol,
-            entry_price=entry_price,
-            quantity=quantity,
-        )
-        s.add(trade)
-        s.flush()
-        s.expunge(trade)
-    return trade
-
-
 def record_trade_exit(
     trade_id: int,
     exit_price: float,
@@ -364,6 +385,105 @@ def get_client_trades(client_id: int, limit: int = 50) -> List[TradesLedger]:
             .limit(limit)
             .all()
         )
+        for t in trades:
+            s.expunge(t)
+        return trades
+
+
+def persist_1m_bar(
+    symbol: str,
+    timestamp: datetime,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float = 0.0,
+) -> None:
+    """
+    Upsert a 1-minute OHLCV bar into option_1m_bar_repository.
+    Silently ignores duplicate (symbol, timestamp) pairs (unique constraint).
+    """
+    try:
+        with db_session() as s:
+            existing = (
+                s.query(Option1mBar)
+                .filter(
+                    Option1mBar.symbol    == symbol,
+                    Option1mBar.timestamp == timestamp,
+                )
+                .first()
+            )
+            if existing is None:
+                s.add(Option1mBar(
+                    symbol=symbol,
+                    timestamp=timestamp,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                ))
+    except Exception as exc:
+        logger.debug("persist_1m_bar failed for %s %s: %s", symbol, timestamp, exc)
+
+
+def load_1m_bars(
+    symbol: str,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> List[Option1mBar]:
+    """Return all stored 1-minute bars for a symbol in the given UTC window."""
+    with db_session() as s:
+        bars = (
+            s.query(Option1mBar)
+            .filter(
+                Option1mBar.symbol    == symbol,
+                Option1mBar.timestamp >= from_dt,
+                Option1mBar.timestamp <= to_dt,
+            )
+            .order_by(Option1mBar.timestamp.asc())
+            .all()
+        )
+        for b in bars:
+            s.expunge(b)
+        return bars
+
+
+def record_trade_entry(
+    client_id: int,
+    contract_symbol: str,
+    entry_price: float,
+    quantity: int = 1,
+    trap_id: Optional[int] = None,
+    is_backtest: bool = False,
+) -> TradesLedger:
+    with db_session() as s:
+        trade = TradesLedger(
+            client_id=client_id,
+            trap_id=trap_id,
+            contract_symbol=contract_symbol,
+            entry_price=entry_price,
+            quantity=quantity,
+            is_backtest=is_backtest,
+        )
+        s.add(trade)
+        s.flush()
+        s.expunge(trade)
+    return trade
+
+
+def get_backtest_trades(
+    from_dt: Optional[datetime] = None,
+    to_dt:   Optional[datetime] = None,
+) -> List[TradesLedger]:
+    """Return trades flagged as backtest simulations."""
+    with db_session() as s:
+        q = s.query(TradesLedger).filter(TradesLedger.is_backtest == True)
+        if from_dt:
+            q = q.filter(TradesLedger.entered_at >= from_dt)
+        if to_dt:
+            q = q.filter(TradesLedger.entered_at <= to_dt)
+        trades = q.order_by(TradesLedger.entered_at.asc()).all()
         for t in trades:
             s.expunge(t)
         return trades
