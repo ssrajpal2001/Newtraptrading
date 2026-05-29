@@ -302,22 +302,34 @@ Startup sequence:
 
 These are the items explicitly not yet implemented. Work on these in the order listed for a production-ready system.
 
-### GAP 1: `_fetch_previous_day_ohlc()` — Real Historical Data Fetch
-**File:** `main.py:51–55`
-**Current state:** Returns hardcoded `(23400.0, 23550.0)`.
-**What to build:** Call the Upstox v2 historical candle API (or Fyers) to fetch the previous trading day's Nifty 50 spot OHLC. Endpoint: `GET https://api.upstox.com/v2/historical-candle/{instrument_key}/day/{to_date}/{from_date}` using `instrument_key = "NSE_INDEX|Nifty 50"`. Falls back to Fyers if Upstox token is unavailable.
+### ~~GAP 1: `_fetch_previous_day_ohlc()` — Real Historical Data Fetch~~ ✅ RESOLVED
+**File:** `main.py`
+**Resolution:** Replaced stub with `_fetch_upstox_previous_ohlc()` and `_fetch_fyers_previous_ohlc()`.
+- Primary: Upstox V3 `GET https://api.upstox.com/v3/historical-candle/NSE_INDEX%7CNifty%2050/1day/{to}/{from}`
+- Extracts `candles[0][1]` (open) and `candles[0][4]` (close) — descending order, index 0 = most recent day
+- `_last_trading_day()` helper skips weekends to find the correct prior session
+- Fyers fallback: `GET https://api.fyers.in/api/v2/history?symbol=NSE:NIFTY50-INDEX&resolution=D&...`
+- Fyers candles are ascending; extracts `candles[-1][1]` and `candles[-1][4]`
+- Raises `RuntimeError` if both fail so the operator is alerted instead of silently using stale data
 
-### GAP 2: Upstox Binary WebSocket Protocol
-**File:** `data_feeder.py:_push_upstox_tick()`
-**Current state:** Assumes JSON `{"feeds": {symbol: {"ff": {"marketFF": {"ltpc": {"ltp": ...}}}}}}` structure.
-**Real behaviour:** Upstox Market Data Feed v3 sends **binary protobuf messages**, not JSON. You must import and use Upstox's published `MarketDataFeed.proto` schema. The correct decode flow is:
-```python
-import struct
-from google.protobuf import descriptor_pool, message_factory
-# OR use the upstox_python_sdk package which wraps this
-from upstox_client.feeder.market_data_feeder import MarketDataFeed
-```
-Alternatively, use the official `upstox-python-sdk` package's `MarketDataFeedV3` WebSocket client which handles the protobuf decode internally.
+### ~~GAP 2: Upstox Binary WebSocket Protocol~~ ✅ RESOLVED
+**Files:** `data_feeder.py`, `proto/MarketDataFeed.proto`, `build_protos.py`
+**Resolution:**
+- `proto/MarketDataFeed.proto` — official Upstox proto definition (all message types: FeedResponse, Feed, FullFeed, MarketFullFeed, IndexFullFeed, LTPC, Level, MarketOHLC, OptionGreeks, compact/extended variants)
+- `build_protos.py` — runs `grpc_tools.protoc` to compile → `proto/MarketDataFeed_pb2.py`
+- `data_feeder.py` — imports `from proto import MarketDataFeed_pb2 as _pb2` with `try/except` graceful fallback
+- `UpstoxFeeder` upgraded: URL → V3 `wss://api.upstox.com/v3/feed/market-data-feed`, `max_size=8MB`
+- `_to_upstox_key()` converts `NSE:NIFTY03JUN2523500CE` → `NSE_FO|NIFTY2562323500CE` for subscription
+- `_decode_upstox_binary(frame, key_to_display)` — full decode path:
+  ```
+  FeedResponse.ParseFromString(frame)
+    .feeds[instrument_key]
+      .fullFeed.marketFF.ltpc.ltp   ← option premium last traded price
+      .fullFeed.marketFF.ltpc.ltt   ← epoch-ms timestamp → ISO string
+      .fullFeed.marketFF.ltpc.ltq   ← last traded quantity → volume
+  ```
+- `deploy/setup_ec2.sh` updated to run `build_protos.py` during provisioning
+- **Run `python build_protos.py` once after `pip install -r requirements.txt`**
 
 ### GAP 3: StreamlitDataBridge Not Wired to BarAggregator
 **Files:** `app_ui.py:StreamlitDataBridge`, `data_feeder.py:BarAggregator`

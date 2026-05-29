@@ -112,10 +112,19 @@ if [ ! -f "$APP_DIR/.env" ]; then
 fi
 
 # -------------------------------------------------------------------
-# 6. Initialise database
+# 6. Compile protobuf bindings + initialise database
 # -------------------------------------------------------------------
-echo "[5/7] Initialising database…"
+echo "[5/7] Compiling Upstox V3 protobuf bindings…"
 cd "$APP_DIR"
+.venv/bin/python build_protos.py
+if [ $? -ne 0 ]; then
+    echo "  WARNING: proto compilation failed. Upstox binary feed will not decode."
+    echo "  Fix: pip install grpcio-tools && python build_protos.py"
+else
+    echo "  proto/MarketDataFeed_pb2.py compiled successfully."
+fi
+
+echo "  Initialising database schema…"
 .venv/bin/python -c "from database import init_db; init_db()"
 
 # -------------------------------------------------------------------

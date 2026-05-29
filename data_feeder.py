@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import time as _time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -48,6 +47,23 @@ from database import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Upstox V3 protobuf binding — imported at module load time.
+# If the proto hasn't been compiled yet (build_protos.py not run), the feeder
+# falls back to JSON parsing and logs a one-time warning.
+# ---------------------------------------------------------------------------
+try:
+    from proto import MarketDataFeed_pb2 as _pb2
+    _PROTOBUF_AVAILABLE = True
+    logger.debug("Upstox protobuf binding loaded from proto.MarketDataFeed_pb2")
+except ImportError:
+    _pb2 = None  # type: ignore[assignment]
+    _PROTOBUF_AVAILABLE = False
+    logger.warning(
+        "proto/MarketDataFeed_pb2.py not found — run `python build_protos.py` "
+        "before starting the engine. Upstox feeder will attempt JSON fallback."
+    )
 
 # ---------------------------------------------------------------------------
 # Shared tick queue (primary and fallback feeders both push here)
@@ -416,17 +432,68 @@ class BarAggregator:
 
 
 # ---------------------------------------------------------------------------
-# Upstox WebSocket feeder
+# Upstox WebSocket feeder  (MarketDataStreamer V3 — binary protobuf frames)
+# ---------------------------------------------------------------------------
+#
+# V3 changes from V2:
+#   • URL:      wss://api.upstox.com/v3/feed/market-data-feed
+#   • Frames:   binary protobuf (FeedResponse), NOT JSON
+#   • Sub msg:  same JSON envelope, but instrumentKeys use NSE_FO| prefix
+#
+# Instrument key format for NFO weekly options:
+#   NSE_FO|NIFTY{YY}{M}{DD}{strike}{CE|PE}
+#   e.g. NSE_FO|NIFTY2562323500CE  (June 23 2025, 23500 CE)
+#
+# The DayConfig.ce_symbol / pe_symbol are stored in NSE:NIFTY... display
+# format.  _to_upstox_key() converts them at subscription time.
 # ---------------------------------------------------------------------------
 
-UPSTOX_WS_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
+UPSTOX_WS_URL_V3 = "wss://api.upstox.com/v3/feed/market-data-feed"
+
+
+def _to_upstox_key(display_symbol: str) -> str:
+    """
+    Convert NSE:NIFTY03JUN2523500CE  →  NSE_FO|NIFTY2562323500CE
+    (Upstox V3 weekly option instrument key format).
+
+    Format breakdown: NSE_FO|NIFTY + YY + M(1-12) + DD + strike + type
+    The Upstox weekly key omits leading zeros from single-digit months.
+    """
+    import re
+    _MONTH_MAP = {
+        "JAN": 1,  "FEB": 2,  "MAR": 3,  "APR": 4,
+        "MAY": 5,  "JUN": 6,  "JUL": 7,  "AUG": 8,
+        "SEP": 9,  "OCT": 10, "NOV": 11, "DEC": 12,
+    }
+    # Pattern: NSE:NIFTY + DDMMMYY + strike + type
+    m = re.match(
+        r"NSE:NIFTY(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$",
+        display_symbol.upper(),
+    )
+    if not m:
+        # Symbol is already in Upstox format or unknown — return as-is
+        logger.warning("Cannot convert symbol to Upstox key: %s", display_symbol)
+        return display_symbol
+
+    dd, mon, yy, strike, opt_type = m.groups()
+    month_num = _MONTH_MAP.get(mon, 0)
+    if not month_num:
+        logger.warning("Unknown month %s in symbol %s", mon, display_symbol)
+        return display_symbol
+
+    # Upstox format: NIFTY + YY + month(no leading zero) + DD + strike + type
+    return f"NSE_FO|NIFTY{yy}{month_num}{dd}{strike}{opt_type}"
 
 
 class UpstoxFeeder:
     def __init__(self, symbols: list[str]) -> None:
-        self.symbols     = symbols
-        self._last_tick  = _time.monotonic()
-        self._running    = False
+        # Convert display symbols to Upstox V3 instrument key format
+        self.display_symbols  = symbols
+        self.instrument_keys  = [_to_upstox_key(s) for s in symbols]
+        # Map instrument key → original display symbol for downstream consumers
+        self._key_to_display  = dict(zip(self.instrument_keys, symbols))
+        self._last_tick       = _time.monotonic()
+        self._running         = False
 
     async def run(self) -> None:
         self._running = True
@@ -435,33 +502,44 @@ class UpstoxFeeder:
             try:
                 headers = {"Authorization": f"Bearer {UPSTOX_ACCESS_TOKEN}"}
                 async with websockets.connect(
-                    UPSTOX_WS_URL, extra_headers=headers, ping_interval=20
+                    UPSTOX_WS_URL_V3,
+                    extra_headers=headers,
+                    ping_interval=20,
+                    max_size=2 ** 23,       # 8 MB — handles large market-depth frames
                 ) as ws:
                     delay_idx = 0
                     subscribe_msg = json.dumps({
-                        "guid": "newtrap-upstox",
+                        "guid":   "newtrap-upstox-v3",
                         "method": "sub",
-                        "data": {"mode": "full", "instrumentKeys": self.symbols},
+                        "data": {
+                            "mode":           "full",
+                            "instrumentKeys": self.instrument_keys,
+                        },
                     })
                     await ws.send(subscribe_msg)
-                    logger.info("Upstox feeder subscribed to %s", self.symbols)
+                    logger.info(
+                        "Upstox V3 feeder subscribed | keys=%s", self.instrument_keys
+                    )
 
-                    async for raw in ws:
+                    async for frame in ws:
                         self._last_tick = _time.monotonic()
-                        data = json.loads(raw) if isinstance(raw, str) else {}
-                        await _push_upstox_tick(data)
+                        if isinstance(frame, bytes):
+                            await _decode_upstox_binary(frame, self._key_to_display)
+                        else:
+                            # Text frame — server-side control/error message; log and skip
+                            logger.debug("Upstox text frame: %s", frame[:200])
 
             except ConnectionClosed as e:
-                logger.warning("Upstox WS closed: %s", e)
+                logger.warning("Upstox V3 WS closed: %s", e)
             except WebSocketException as e:
-                logger.error("Upstox WS error: %s", e)
+                logger.error("Upstox V3 WS error: %s", e)
             except Exception as e:
-                logger.exception("Upstox unexpected error: %s", e)
+                logger.exception("Upstox V3 unexpected error: %s", e)
 
             if not self._running:
                 break
             delay = RECONNECT_DELAYS[min(delay_idx, len(RECONNECT_DELAYS) - 1)]
-            logger.info("Upstox reconnecting in %ds …", delay)
+            logger.info("Upstox V3 reconnecting in %ds …", delay)
             await asyncio.sleep(delay)
             delay_idx += 1
 
@@ -472,18 +550,75 @@ class UpstoxFeeder:
         self._running = False
 
 
-async def _push_upstox_tick(data: Dict[str, Any]) -> None:
-    feeds = data.get("feeds", {})
-    for sym, feed in feeds.items():
-        ltpc = feed.get("ff", {}).get("marketFF", {}).get("ltpc", {})
-        price = float(ltpc.get("ltp", 0) or 0)
-        if price:
-            await TICK_QUEUE.put({
-                "symbol": sym,
-                "price":  price,
-                "ts":     ltpc.get("ltt", ""),
-                "volume": float(ltpc.get("ltq", 0) or 0),
-            })
+async def _decode_upstox_binary(
+    frame: bytes,
+    key_to_display: Dict[str, str],
+) -> None:
+    """
+    Deserialise a binary protobuf frame from Upstox MarketDataStreamer V3.
+
+    FeedResponse structure (abbreviated):
+        FeedResponse
+          .feeds: map<string, Feed>          key = instrument_key (e.g. NSE_FO|...)
+            Feed.fullFeed
+              FullFeed.marketFF              for options / equities
+                MarketFullFeed.ltpc
+                  LTPC.ltp                  last traded price  ← we need this
+                  LTPC.ltt                  last traded time (epoch ms)
+                  LTPC.ltq                  last traded quantity
+              FullFeed.indexFF               for indices (Nifty spot – NOT used here)
+                IndexFullFeed.ltpc.ltp
+
+    Falls back to no-op with a warning if the proto binding is not compiled.
+    """
+    if not _PROTOBUF_AVAILABLE or _pb2 is None:
+        # Proto not compiled — nothing to parse.  Operator must run build_protos.py.
+        return
+
+    try:
+        feed_response = _pb2.FeedResponse()
+        feed_response.ParseFromString(frame)
+    except Exception as exc:
+        logger.debug("Protobuf parse error (frame len=%d): %s", len(frame), exc)
+        return
+
+    for instrument_key, feed in feed_response.feeds.items():
+        # Resolve the display symbol from the instrument key
+        display_sym = key_to_display.get(instrument_key, instrument_key)
+
+        # Navigate the oneof chain: fullFeed → marketFF → ltpc
+        # (fullFeed is set for options; indexFF is set for indices — we never
+        #  subscribe to index instruments, so the marketFF branch is always taken)
+        ltpc = None
+        which_feed = feed.WhichOneof("FeedUnion")
+        if which_feed == "fullFeed":
+            which_full = feed.fullFeed.WhichOneof("FullFeedUnion")
+            if which_full == "marketFF":
+                ltpc = feed.fullFeed.marketFF.ltpc
+            elif which_full == "indexFF":
+                ltpc = feed.fullFeed.indexFF.ltpc
+        elif which_feed == "compactFeed":
+            which_compact = feed.compactFeed.WhichOneof("CompactFeedUnion")
+            if which_compact == "marketCF":
+                ltpc = feed.compactFeed.marketCF.ltpc
+            elif which_compact == "indexCF":
+                ltpc = feed.compactFeed.indexCF.ltpc
+
+        if ltpc is None or ltpc.ltp == 0.0:
+            continue
+
+        # Convert epoch-ms ltt to ISO string for downstream BarAggregator
+        try:
+            ts_str = datetime.fromtimestamp(ltpc.ltt / 1000).isoformat()
+        except (OSError, ValueError, OverflowError):
+            ts_str = ""
+
+        await TICK_QUEUE.put({
+            "symbol": display_sym,
+            "price":  float(ltpc.ltp),
+            "ts":     ts_str,
+            "volume": float(ltpc.ltq),
+        })
 
 
 # ---------------------------------------------------------------------------

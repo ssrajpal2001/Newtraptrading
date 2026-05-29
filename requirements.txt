@@ -26,5 +26,11 @@ pyotp>=2.9.0
 # Sync HTTP (OAuth token exchange in oauth_handler.py)
 requests>=2.31.0
 
+# Protobuf — Upstox V3 binary WebSocket frame decoding
+protobuf>=4.25.0
+
+# Proto compiler — run `python build_protos.py` once after install
+grpcio-tools>=1.62.0
+
 # Utilities
 python-dotenv>=1.0.0
