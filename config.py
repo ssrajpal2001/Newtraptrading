@@ -38,6 +38,7 @@ EXPIRY_FLUSH_TIME    = time(15, 30)      # Tuesday flush trigger
 EXPIRY_WEEKDAY       = 1                 # Tuesday = 1 (Mon=0)
 
 NIFTY_STRIKE_STEP    = 50               # Nearest rounding interval (points)
+LOT_SIZE             = 25               # Nifty options lot size (NSE fixed at 25 units)
 HTF_BAR_MINUTES      = 75
 LTF_BAR_MINUTES      = 5
 RISK_BAR_MINUTES     = 1

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from config import LOT_SIZE
 from database import (
     ClientsRegistry,
     ExitCategory,
@@ -32,9 +34,9 @@ from database import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# In-memory open positions registry: client_id → (trade_id, symbol, entry_px)
+# In-memory open positions registry: client_id → (trade_id, symbol, entry_px, quantity)
 # ---------------------------------------------------------------------------
-_OPEN_POSITIONS: Dict[int, Tuple[int, str, float]] = {}
+_OPEN_POSITIONS: Dict[int, Tuple[int, str, float, int]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +351,16 @@ class ExecutionEngine:
         symbol: str,
         entry_price: float,
         trap_id: int,
-        quantity: int = 1,
+        quantity: int = 0,
     ) -> None:
-        """Fan-out market BUY to all clients concurrently."""
+        """
+        Fan-out market BUY to all clients concurrently.
+
+        quantity=0 (default) means auto-compute per client from max_capital:
+            num_lots = floor(max_capital / (entry_price * LOT_SIZE))
+            quantity = max(1, num_lots) * LOT_SIZE
+        Pass an explicit positive quantity to override for all clients.
+        """
         if not self._clients:
             self.reload_clients()
 
@@ -368,15 +377,32 @@ class ExecutionEngine:
             if isinstance(result, Exception):
                 logger.error("Order failed for client %s: %s", client.name, result)
 
+    @staticmethod
+    def _compute_quantity(client: ClientsRegistry, entry_price: float, override: int) -> int:
+        """
+        Compute lot-aligned order quantity for a client.
+        override > 0: use that value as-is.
+        override == 0: derive from max_capital.
+          num_lots = floor(max_capital / (entry_price * LOT_SIZE)), minimum 1 lot.
+          quantity = num_lots * LOT_SIZE
+        """
+        if override > 0:
+            return override
+        if entry_price <= 0:
+            return LOT_SIZE   # fallback: 1 lot
+        num_lots = max(1, math.floor((client.max_capital or LOT_SIZE) / (entry_price * LOT_SIZE)))
+        return num_lots * LOT_SIZE
+
     async def _place_buy_for_client(
         self,
         client: ClientsRegistry,
         symbol: str,
         entry_price: float,
-        quantity: int,
+        quantity_override: int,
         trap_id: int,
     ) -> None:
-        adapter = self._adapters[client.id]
+        quantity = self._compute_quantity(client, entry_price, quantity_override)
+        adapter  = self._adapters[client.id]
         try:
             resp = await adapter.place_market_buy(symbol, quantity)
             trade = record_trade_entry(
@@ -386,10 +412,10 @@ class ExecutionEngine:
                 quantity=quantity,
                 trap_id=trap_id,
             )
-            _OPEN_POSITIONS[client.id] = (trade.id, symbol, entry_price)
+            _OPEN_POSITIONS[client.id] = (trade.id, symbol, entry_price, quantity)
             logger.info(
-                "BUY placed | client=%s trade_id=%d resp=%s",
-                client.name, trade.id, resp,
+                "BUY placed | client=%s qty=%d (max_cap=%.0f) trade_id=%d resp=%s",
+                client.name, quantity, client.max_capital or 0, trade.id, resp,
             )
         except Exception as exc:
             logger.exception("BUY error for client %s: %s", client.name, exc)
@@ -428,9 +454,9 @@ class ExecutionEngine:
             pos = _OPEN_POSITIONS.get(client.id)
             if pos is None:
                 continue
-            trade_id, symbol, _ = pos
+            trade_id, symbol, _entry_px, quantity = pos
             tasks.append(
-                self._close_position_for_client(client, trade_id, symbol, exit_category)
+                self._close_position_for_client(client, trade_id, symbol, quantity, exit_category)
             )
 
         if tasks:
@@ -446,17 +472,18 @@ class ExecutionEngine:
         client: ClientsRegistry,
         trade_id: int,
         symbol: str,
+        quantity: int,
         exit_category: ExitCategory,
     ) -> None:
         adapter = self._adapters[client.id]
         try:
             exit_price = await adapter.get_ltp(symbol)
-            await adapter.place_market_sell(symbol, quantity=1)
+            await adapter.place_market_sell(symbol, quantity=quantity)
             record_trade_exit(trade_id, exit_price, exit_category)
             _OPEN_POSITIONS.pop(client.id, None)
             logger.info(
-                "EXIT placed | client=%s trade_id=%d exit=%.2f cat=%s",
-                client.name, trade_id, exit_price, exit_category,
+                "EXIT placed | client=%s qty=%d trade_id=%d exit=%.2f cat=%s",
+                client.name, quantity, trade_id, exit_price, exit_category,
             )
         except Exception as exc:
             logger.exception("EXIT error for client %s: %s", client.name, exc)
@@ -479,7 +506,7 @@ class ExecutionEngine:
                 result[name] = 0.0
         return result
 
-    def get_open_positions(self) -> Dict[int, Tuple[int, str, float]]:
+    def get_open_positions(self) -> Dict[int, Tuple[int, str, float, int]]:
         return dict(_OPEN_POSITIONS)
 
 

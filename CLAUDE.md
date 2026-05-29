@@ -357,28 +357,30 @@ These are the items explicitly not yet implemented. Work on these in the order l
 - `TrapDetector.on_tick()`: at entry moment, reads `_data_bridge.get_spot_price()` and calls `_build_atm_symbol()`. Falls back to tracked symbol if spot not yet received (logs a warning)
 - `TrapDetector.on_ltf_bar_close()`: calls `_data_bridge.set_retest_active(True)` when premium enters retest zone (also fixes Gap 10)
 
-### GAP 6: Position Sizing by `max_capital`
-**Files:** `execution_engine.py:fire_entry()`
-**Current state:** `quantity=1` hardcoded for all clients.
-**What to build:** For each client, compute quantity as `floor(client.max_capital / (entry_price * LOT_SIZE))` where `LOT_SIZE = 25` (current Nifty lot size). Cap at `max_capital`. Add `LOT_SIZE = 25` constant to `config.py`.
+### ~~GAP 6: Position Sizing by `max_capital`~~ ✅ RESOLVED
+**Resolution:**
+- `LOT_SIZE = 25` added to `config.py`
+- `_OPEN_POSITIONS` tuple extended to 4-element: `(trade_id, symbol, entry_px, quantity)`
+- `ExecutionEngine._compute_quantity(client, entry_price, override)` static method: `num_lots = max(1, floor(max_capital / (entry_price * LOT_SIZE)))`, `quantity = num_lots * LOT_SIZE`
+- `fire_entry(quantity=0)` — zero means auto-compute per client; positive value overrides all clients
+- `_close_position_for_client` now uses the stored quantity from `_OPEN_POSITIONS` (not hardcoded `quantity=1`)
+- `execution_engine.py` imports `LOT_SIZE` from `config`
 
-### GAP 7: Daily Token Auto-Refresh Script
-**Files:** Not created yet
-**What to build:** A `scripts/refresh_tokens.py` that:
-1. At 08:30 AM, iterates all active clients
-2. For each client, calls the broker's token-refresh API (or re-runs the OAuth flow non-interactively using stored TOTP secrets where possible, e.g., Angel One)
-3. Updates `access_token` in the database
-4. Runs as a cron job: `30 8 * * 1-5 /opt/newtraptrading/.venv/bin/python scripts/refresh_tokens.py`
+### ~~GAP 7: Daily Token Auto-Refresh Script~~ ✅ RESOLVED
+**Resolution:**
+- `scripts/refresh_tokens.py` — standalone headless cron worker
+- Angel One: TOTP-based re-auth via `SmartConnect.generateSession(clientCode, password, totp)` using stored `totp_secret`
+- All other brokers: logs the broker auth URL with SSH tunnel instructions so operators can complete login from their laptop
+- Cron install: `30 8 * * 1-5 /opt/newtraptrading/.venv/bin/python /opt/newtraptrading/scripts/refresh_tokens.py`
 
-### GAP 8: `pages/3_Trade_History.py` — Dedicated Trade History Page
-**Referenced in:** `docs/USER_GUIDE.md`
-**What to build:** A dedicated Streamlit page with:
-- Date range filter
-- Per-client filter dropdown
-- Full trade table with all columns
-- Summary statistics: total trades, win rate, average P&L, largest win/loss
-- A Plotly P&L equity curve chart (cumulative P&L over time)
-- Export CSV button
+### ~~GAP 8: `pages/3_Trade_History.py` — Dedicated Trade History Page~~ ✅ RESOLVED
+**Resolution:**
+- `pages/3_Trade_History.py` — full Obsidian Dark Streamlit page
+- Filters: date range (`from`/`to`) + multi-select client dropdown
+- Summary metric cards: Total Trades, Closed Trades, Win Rate, Net P&L, Largest Win, Largest Loss
+- Plotly equity curve: cumulative P&L by exit time with green/red fill above/below zero
+- Trade table: P&L colour-coded (green positive, red negative, orange open), styled DataFrame
+- CSV export: `st.download_button` with date-range filename
 
 ### GAP 9: Live Unrealized P&L on Open Positions
 **Files:** `app_ui.py`, `execution_engine.py`
@@ -403,7 +405,7 @@ These are the items explicitly not yet implemented. Work on these in the order l
 - `config.py` has zero imports from other project modules. All other modules may import from `config.py`.
 - `database.py` imports only from `config.py`. No circular deps.
 - `data_feeder.py` imports from `config.py` and `database.py` only.
-- `execution_engine.py` imports from `database.py` only.
+- `execution_engine.py` imports from `config.py` and `database.py` only.
 - `oauth_handler.py` imports from `database.py` only.
 - `app_ui.py` and `pages/` may import from any module.
 - `main.py` imports from all modules to wire them together.
