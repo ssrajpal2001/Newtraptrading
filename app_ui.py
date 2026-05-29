@@ -463,6 +463,32 @@ def _render_client_dashboard() -> None:
         col = cols[idx % len(cols)]
         pos = open_pos.get(client.id)
         with col:
+            # Build position block with live unrealized P&L
+            if pos:
+                _trade_id, pos_symbol, entry_px, pos_qty = pos
+                ltp = _data_bridge.get_last_price(pos_symbol)
+                if ltp is not None and entry_px > 0:
+                    upnl     = (ltp - entry_px) * pos_qty
+                    upnl_color = "#238636" if upnl >= 0 else "#DA3633"
+                    sign       = "+" if upnl >= 0 else ""
+                    upnl_str   = (
+                        f"<span style='color:{upnl_color}; font-weight:700;'>"
+                        f"₹{sign}{upnl:,.2f}</span>"
+                    )
+                    ltp_str = f"LTP ₹{ltp:,.2f} · {pos_qty} qty"
+                else:
+                    upnl_str = "<span style='color:#f0a500;'>Awaiting feed…</span>"
+                    ltp_str  = f"{pos_qty} qty"
+
+                position_html = (
+                    f"<b>Position:</b> 🔵 {pos_symbol}<br>"
+                    f"<span style='color:#8B949E; font-size:0.8rem;'>"
+                    f"Entry ₹{entry_px:,.2f} · {ltp_str}</span><br>"
+                    f"<b>Unrealized P&L:</b> {upnl_str}"
+                )
+            else:
+                position_html = "<b>Position:</b> <span style='color:#8B949E;'>None</span>"
+
             st.markdown(
                 f"<div style='background:#161B22; border:1px solid #30363D; "
                 f"border-radius:6px; padding:12px; margin-bottom:8px;'>"
@@ -471,7 +497,7 @@ def _render_client_dashboard() -> None:
                 f"<hr style='border-color:#30363D; margin:6px 0;'>"
                 f"<b>Status:</b> {'🟢 ACTIVE' if client.active else '🔴 INACTIVE'}<br>"
                 f"<b>Capital:</b> ₹{client.max_capital:,.0f}<br>"
-                f"<b>Position:</b> {'🔵 ' + pos[1] if pos else 'None'}"
+                f"{position_html}"
                 f"</div>",
                 unsafe_allow_html=True,
             )

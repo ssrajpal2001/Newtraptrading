@@ -382,10 +382,15 @@ These are the items explicitly not yet implemented. Work on these in the order l
 - Trade table: P&L colour-coded (green positive, red negative, orange open), styled DataFrame
 - CSV export: `st.download_button` with date-range filename
 
-### GAP 9: Live Unrealized P&L on Open Positions
-**Files:** `app_ui.py`, `execution_engine.py`
-**Current state:** Realized P&L is stored in `trades_ledger.pnl`. Open positions show the symbol but not the current unrealized P&L.
-**What to build:** In the client cards on the main dashboard, for each open position call `adapter.get_ltp(symbol)` and display `unrealized_pnl = (ltp - entry_price) * quantity`. Use a background thread to refresh LTP every 5 seconds.
+### ~~GAP 9: Live Unrealized P&L on Open Positions~~ ✅ RESOLVED
+**Resolution:**
+- `bridge.py` extended with `_symbol_prices: Dict[str, float]` — `push_tick()` now stores every tick in this dict keyed by symbol
+- `get_last_price(symbol)` added: exact-symbol lookup first, then CE/PE fallback (handles ATM vs ITM symbol mismatch)
+- `app_ui.py:_render_client_dashboard()` reads `_data_bridge.get_last_price(pos_symbol)` on each render
+- `unrealized_pnl = (ltp - entry_price) * quantity` — uses the exact entry price and lot count from `_OPEN_POSITIONS`
+- Rendered with `#238636` (green, positive float) or `#DA3633` (red, underwater), `₹+/−` prefix; shows "Awaiting feed…" in orange if LTP not yet received
+- No broker REST calls needed — LTP comes from the already-running WebSocket tick stream via bridge
+- Also fixes: `scripts/refresh_tokens.py` now calls `load_dotenv(.env)` before importing project modules so cron has DATABASE_URL
 
 ### GAP 10: `retest_active` Session State Never Set to True
 **File:** `app_ui.py`

@@ -40,11 +40,12 @@ class StreamlitDataBridge:
         self._lock       = threading.Lock()
         self._ce_bars:   List[Tuple] = []
         self._pe_bars:   List[Tuple] = []
-        self._last_ce_price: Optional[float] = None
-        self._last_pe_price: Optional[float] = None
-        self._spot_price:    Optional[float] = None
-        self._retest_active: bool            = False
-        self._active_traps:  List[Any]       = []
+        self._last_ce_price:  Optional[float] = None
+        self._last_pe_price:  Optional[float] = None
+        self._symbol_prices:  Dict[str, float] = {}   # symbol → last tick price
+        self._spot_price:     Optional[float] = None
+        self._retest_active:  bool            = False
+        self._active_traps:   List[Any]       = []
 
     # ------------------------------------------------------------------
     # Bar data (called from BarAggregator on HTF bar close)
@@ -69,10 +70,24 @@ class StreamlitDataBridge:
     def push_tick(self, symbol: str, price: float) -> None:
         """Update the latest CE or PE option premium price."""
         with self._lock:
+            self._symbol_prices[symbol] = price
             if "CE" in symbol:
                 self._last_ce_price = price
             else:
                 self._last_pe_price = price
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        """
+        Return the most recent tick price for an option symbol.
+        Falls back to the tracked CE/PE price if the exact symbol has no entry yet
+        (handles the case where the executed ATM symbol differs from the tracked ITM symbol).
+        """
+        with self._lock:
+            exact = self._symbol_prices.get(symbol)
+            if exact is not None:
+                return exact
+            # Fallback by option type
+            return self._last_ce_price if "CE" in symbol else self._last_pe_price
 
     # ------------------------------------------------------------------
     # Nifty spot index price (called from _decode_upstox_binary for index feed)

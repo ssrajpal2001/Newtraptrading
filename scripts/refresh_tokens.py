@@ -19,7 +19,16 @@ import os
 import sys
 
 # Allow running from any directory — add repo root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
+
+# Load .env before importing project modules so DATABASE_URL and API credentials
+# are available — system cron runs with a bare environment that has no .env vars.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    pass  # python-dotenv not installed; rely on environment variables being set externally
 
 logging.basicConfig(
     level=logging.INFO,
