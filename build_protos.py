@@ -46,7 +46,7 @@ def main() -> int:
     if result == 0:
         pb2_path = os.path.join(proto_dir, "MarketDataFeed_pb2.py")
         if os.path.exists(pb2_path):
-            print(f"✓  Compiled → {pb2_path}")
+            print(f"OK Compiled -> {pb2_path}")
         else:
             print("WARNING: protoc exited 0 but _pb2.py not found", file=sys.stderr)
     else:
