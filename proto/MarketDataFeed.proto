@@ -1,0 +1,167 @@
+// MarketDataFeed.proto
+// Official Upstox MarketDataStreamer V3 protocol buffer schema.
+// Source: https://assets.upstox.com/feed/market-data-feed/v3/MarketDataFeed.proto
+//
+// To compile:
+//   python build_protos.py
+// This generates proto/MarketDataFeed_pb2.py which data_feeder.py imports.
+
+syntax = "proto3";
+
+package com.upstox.marketdatafeeder.rpc.proto;
+
+// ── Top-level message types ────────────────────────────────────────────────
+
+enum Type {
+  full_feed    = 0;
+  compact_feed = 1;
+  disconnected = 2;
+  unknown      = 3;
+  ohlc         = 4;
+  option_chain = 5;
+}
+
+message FeedResponse {
+  Type                   type      = 1;
+  map<string, Feed>      feeds     = 2;
+  int64                  currentTs = 3;
+}
+
+// ── Per-instrument container ───────────────────────────────────────────────
+
+message Feed {
+  oneof FeedUnion {
+    FullFeed     fullFeed     = 1;
+    CompactFeed  compactFeed  = 2;
+    ExtendedFeed extendedFeed = 3;
+  }
+  OptionGreeks optionGreeks = 4;
+}
+
+// ── Full feed ─────────────────────────────────────────────────────────────
+
+message FullFeed {
+  oneof FullFeedUnion {
+    MarketFullFeed marketFF = 1;
+    IndexFullFeed  indexFF  = 2;
+  }
+}
+
+message MarketFullFeed {
+  LTPC              ltpc        = 1;
+  repeated Level    bidAskQuote = 2;
+  MarketOHLC        ohlcData    = 3;
+  double            netChange   = 4;
+  int64             vtt         = 5;
+  double            atp         = 6;
+  int64             oi          = 7;
+  double            upperCb     = 8;
+  double            lowerCb     = 9;
+  double            high52Week  = 10;
+  double            low52Week   = 11;
+}
+
+message IndexFullFeed {
+  LTPC       ltpc       = 1;
+  MarketOHLC ohlcData   = 2;
+  double     netChange  = 3;
+  double     high52Week = 4;
+  double     low52Week  = 5;
+}
+
+// ── Compact feed ──────────────────────────────────────────────────────────
+
+message CompactFeed {
+  oneof CompactFeedUnion {
+    MarketCompactFeed marketCF = 1;
+    IndexCompactFeed  indexCF  = 2;
+  }
+}
+
+message MarketCompactFeed {
+  LTPC   ltpc      = 1;
+  double bidPrice  = 2;
+  double askPrice  = 3;
+  double netChange = 4;
+  int64  vtt       = 5;
+  double atp       = 6;
+  int64  bidQty    = 7;
+  int64  askQty    = 8;
+  int64  oi        = 9;
+  double upperCb   = 10;
+  double lowerCb   = 11;
+}
+
+message IndexCompactFeed {
+  LTPC   ltpc      = 1;
+  double netChange = 2;
+}
+
+// ── Extended feed ─────────────────────────────────────────────────────────
+
+message ExtendedFeed {
+  oneof ExtendedFeedUnion {
+    MarketExtendedFeed marketEF = 1;
+  }
+}
+
+message MarketExtendedFeed {
+  LTPC           ltpc              = 1;
+  repeated Level bidAskQuote       = 2;
+  MarketOHLC     ohlcData          = 3;
+  double         netChange         = 4;
+  int64          vtt               = 5;
+  double         atp               = 6;
+  int64          oi                = 7;
+  double         upperCb           = 8;
+  double         lowerCb           = 9;
+  double         high52Week        = 10;
+  double         low52Week         = 11;
+  int64          lastTradedTs      = 12;
+  int64          expiry            = 13;
+  double         strikePrice       = 14;
+  string         optionType        = 15;
+  double         delta             = 16;
+  double         gamma             = 17;
+  double         theta             = 18;
+  double         vega              = 19;
+  double         impliedVolatility = 20;
+}
+
+// ── Shared sub-messages ───────────────────────────────────────────────────
+
+message LTPC {
+  double ltp = 1;   // Last traded price
+  double ltt = 2;   // Last traded time (epoch ms)
+  double ltq = 3;   // Last traded quantity
+  double cp  = 4;   // Close price (previous day)
+}
+
+message Level {
+  double price     = 1;
+  int64  quantity  = 2;
+  int64  numOrders = 3;
+}
+
+message MarketOHLC {
+  message Candle {
+    string interval = 1;
+    double open     = 2;
+    double high     = 3;
+    double low      = 4;
+    double close    = 5;
+    int64  volume   = 6;
+    int64  ts       = 7;
+  }
+  repeated Candle ohlc = 1;
+}
+
+message OptionGreeks {
+  double op    = 1;
+  double up    = 2;
+  double delta = 3;
+  double theta = 4;
+  double gamma = 5;
+  double vega  = 6;
+  double iv    = 7;
+}

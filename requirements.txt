@@ -1,0 +1,36 @@
+# Core async runtime
+asyncio-throttle>=1.0.2
+
+# WebSocket connectivity
+websockets>=12.0
+
+# Database ORM
+sqlalchemy>=2.0.0
+
+# Async HTTP (Groww adapter, Fyers REST)
+aiohttp>=3.9.0
+
+# Dashboard / UI
+streamlit>=1.35.0
+plotly>=5.22.0
+pandas>=2.2.0
+
+# TOTP for Angel One / broker 2FA
+pyotp>=2.9.0
+
+# Broker SDKs – install only the ones you use
+# kiteconnect>=4.2.0          # Zerodha Kite
+# smartapi-python>=1.3.5      # Angel One SmartAPI
+# alice_blue>=2.3.0            # Alice Blue ANT
+
+# Sync HTTP (OAuth token exchange in oauth_handler.py)
+requests>=2.31.0
+
+# Protobuf — Upstox V3 binary WebSocket frame decoding
+protobuf>=4.25.0
+
+# Proto compiler — run `python build_protos.py` once after install
+grpcio-tools>=1.62.0
+
+# Utilities
+python-dotenv>=1.0.0

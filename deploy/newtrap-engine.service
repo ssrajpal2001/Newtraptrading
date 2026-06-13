@@ -1,0 +1,46 @@
+# /etc/systemd/system/newtrap-engine.service
+#
+# Persistent background daemon for the NewTrap trading engine.
+# Survives SSH disconnects, laptop lid-closes, and network drops.
+#
+# Install:
+#   sudo cp deploy/newtrap-engine.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable newtrap-engine
+#   sudo systemctl start  newtrap-engine
+#
+# Logs:
+#   sudo journalctl -u newtrap-engine -f
+
+[Unit]
+Description=NewTrap Trading Engine
+Documentation=https://github.com/ssrajpal2001/Newtraptrading
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/newtraptrading
+ExecStart=/opt/newtraptrading/.venv/bin/python main.py
+
+# Load .env file for credentials
+EnvironmentFile=/opt/newtraptrading/.env
+
+# Restart on any non-zero exit, with a 10-second backoff
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=newtrap-engine
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

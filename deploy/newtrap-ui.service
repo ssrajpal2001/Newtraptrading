@@ -1,0 +1,46 @@
+# /etc/systemd/system/newtrap-ui.service
+#
+# Persistent Streamlit dashboard service.
+#
+# Install:
+#   sudo cp deploy/newtrap-ui.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable newtrap-ui
+#   sudo systemctl start  newtrap-ui
+#
+# Access dashboard at:  http://<EC2-PUBLIC-IP>:8501
+# (ensure port 8501 is open in your EC2 Security Group for your IP only)
+
+[Unit]
+Description=NewTrap Streamlit Dashboard
+Documentation=https://github.com/ssrajpal2001/Newtraptrading
+After=network-online.target newtrap-engine.service
+Wants=newtrap-engine.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/newtraptrading
+ExecStart=/opt/newtraptrading/.venv/bin/streamlit run app_ui.py \
+    --server.port 8501 \
+    --server.headless true \
+    --server.address 0.0.0.0 \
+    --server.enableCORS false \
+    --server.enableXsrfProtection true
+
+EnvironmentFile=/opt/newtraptrading/.env
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=newtrap-ui
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
